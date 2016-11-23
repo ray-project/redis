@@ -51,6 +51,7 @@ typedef struct {
     void*  state;
     int    flags;
     SOCKADDR_STORAGE socketAddrStorage;
+    HANDLE semaphore;
 } SocketInfo;
 
 class RFDMap {
@@ -69,8 +70,10 @@ private:
     map<RFD, int>        RFDToCrtFDMap;
     queue<RFD>           RFDRecyclePool;
 
-private:
+public:
     CRITICAL_SECTION mutex;
+
+private:
     const static int FIRST_RESERVED_RFD_INDEX = 0;
     const static int LAST_RESERVED_RFD_INDEX = 2;
     int next_available_rfd = LAST_RESERVED_RFD_INDEX + 1;

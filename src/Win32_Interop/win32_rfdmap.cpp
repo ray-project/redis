@@ -71,6 +71,7 @@ RFD RFDMap::addSocket(SOCKET s) {
             socket_info.state = NULL;
             socket_info.flags = 0;
             memset(&(socket_info.socketAddrStorage), 0, sizeof(SOCKADDR_STORAGE));
+            socket_info.semaphore = NULL;
             RFDToSocketInfoMap[rfd] = socket_info;
         }
     }
@@ -86,7 +87,14 @@ void RFDMap::removeSocketToRFD(SOCKET s) {
 
 void RFDMap::removeRFDToSocketInfo(RFD rfd) {
     EnterCriticalSection(&mutex);
-    RFDToSocketInfoMap.erase(rfd);
+    map<RFD, SocketInfo>::iterator found = RFDToSocketInfoMap.find(rfd);
+    if (found != RFDToSocketInfoMap.end()) {
+        if (found->second.semaphore) {
+            CloseHandle(found->second.semaphore);
+            found->second.semaphore = NULL;
+        }
+        RFDToSocketInfoMap.erase(found);
+    }
     RFDRecyclePool.push(rfd);
     LeaveCriticalSection(&mutex);
 }

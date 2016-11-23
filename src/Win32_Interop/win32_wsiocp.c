@@ -29,7 +29,7 @@
 #include "Win32_Assert.h"
 #include <errno.h>
 
-static HANDLE iocph;
+static HANDLE iocph = NULL;
 
 #define SUCCEEDED_WITH_IOCP(result) ((result) || (GetLastError() == ERROR_IO_PENDING))
 
@@ -81,12 +81,30 @@ BOOL WSIOCP_CloseSocketStateRFD(int rfd) {
     return WSIOCP_CloseSocketState(WSIOCP_GetExistingSocketState(rfd));
 }
 
+static void WSIOCP_Destroy(void) {
+    if (iocph) {
+        CloseHandle(iocph);
+        iocph = NULL;
+    }
+}
+
 /* For each asynch socket, need to associate completion port */
 int WSIOCP_SocketAttach(int fd, iocpSockState *socketState) {
     if (socketState == NULL) {
         socketState = WSIOCP_GetSocketState(fd);
     }
-
+    if (!iocph) {
+        /* WARNING: HACK: This code is WRONG!!
+         * Double-checked swap is WRONG in threaded code!
+         * However, it should work fine in our case.
+         */
+        HANDLE handle = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+        if (InterlockedCompareExchangePointer(&iocph, handle, NULL)) {
+          CloseHandle(handle);
+        } else {
+          atexit(WSIOCP_Destroy);
+        }
+    }
     if (iocph != NULL && socketState != NULL) {
         if (FDAPI_SocketAttachIOCP(fd, iocph)) {
             socketState->masks = SOCKET_ATTACHED;

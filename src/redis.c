@@ -276,10 +276,10 @@ struct redisCommand redisCommandTable[] = {
     {"dump",dumpCommand,2,"r",0,NULL,1,1,1,0,0},
     {"object",objectCommand,3,"r",0,NULL,2,2,2,0,0},
     {"client",clientCommand,-2,"rs",0,NULL,0,0,0,0,0},
-    {"eval",evalCommand,-3,"s",0,evalGetKeys,0,0,0,0,0},
-    {"evalsha",evalShaCommand,-3,"s",0,evalGetKeys,0,0,0,0,0},
+    {"eval",NULL,-3,"s",0,evalGetKeys,0,0,0,0,0},
+    {"evalsha",NULL,-3,"s",0,evalGetKeys,0,0,0,0,0},
     {"slowlog",slowlogCommand,-2,"r",0,NULL,0,0,0,0,0},
-    {"script",scriptCommand,-2,"rs",0,NULL,0,0,0,0,0},
+    {"script",NULL,-2,"rs",0,NULL,0,0,0,0,0},
     {"time",timeCommand,1,"rRF",0,NULL,0,0,0,0,0},
     {"bitop",bitopCommand,-4,"wm",0,NULL,2,-1,1,0,0},
     {"bitcount",bitcountCommand,-2,"r",0,NULL,1,1,1,0,0},
@@ -1943,7 +1943,7 @@ void initServer(void) {
 
     if (server.cluster_enabled) clusterInit();
     replicationScriptCacheInit();
-    scriptingInit();
+    /* scriptingInit(); */
     slowlogInit();
     latencyMonitorInit();
     bioInit();
@@ -2346,10 +2346,7 @@ int processCommand(redisClient *c) {
           c->cmd->proc != replconfCommand &&
         !(c->cmd->proc == shutdownCommand &&
           c->argc == 2 &&
-          tolower(((char*)c->argv[1]->ptr)[0]) == 'n') &&
-        !(c->cmd->proc == scriptCommand &&
-          c->argc == 2 &&
-          tolower(((char*)c->argv[1]->ptr)[0]) == 'k'))
+          tolower(((char*)c->argv[1]->ptr)[0]) == 'n'))
     {
         flagTransaction(c);
         addReply(c, shared.slowscripterr);
@@ -2792,7 +2789,7 @@ sds genRedisInfoString(char *section) {
             server.resident_set_size,
             server.stat_peak_memory,
             peak_hmem,
-            ((PORT_LONGLONG)lua_gc(server.lua,LUA_GCCOUNT,0))*1024LL,
+            0xBAADF00D,
             zmalloc_get_fragmentation_ratio(server.resident_set_size),
             ZMALLOC_LIB
             );

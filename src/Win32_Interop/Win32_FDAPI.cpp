@@ -37,6 +37,14 @@
 
 using namespace std;
 
+struct sockaddr_un {
+    u_short sun_family;
+    char sun_path[108];
+};
+
+static char const *AF_UNIX_SEMAPHORE_NAME_FORMAT = "Local\\AF_UNIX%s";
+enum { AF_UNIX_PORT_NUMBER_SHIFT = sizeof(USHORT) * CHAR_BIT - 1 };
+
 #define CATCH_AND_REPORT()  catch(const std::exception &){::redisLog(REDIS_WARNING, "FDAPI: std exception");}catch(...){::redisLog(REDIS_WARNING, "FDAPI: other exception");}
 
 extern "C" {
@@ -46,11 +54,13 @@ fdapi_access access = NULL;
 fdapi_bind bind = NULL;
 fdapi_connect connect = NULL;
 fdapi_fcntl fcntl = NULL;
+fdapi_ioctl ioctl = NULL;
 fdapi_fstat fdapi_fstat64 = NULL;
 fdapi_fsync fsync = NULL;
 fdapi_ftruncate ftruncate = NULL;
 fdapi_freeaddrinfo freeaddrinfo = NULL;
 fdapi_getaddrinfo getaddrinfo = NULL;
+fdapi_gethostbyname gethostbyname = NULL;
 fdapi_getpeername getpeername = NULL;
 fdapi_getsockname getsockname = NULL;
 fdapi_getsockopt getsockopt = NULL;
@@ -67,7 +77,9 @@ fdapi_open open = NULL;
 fdapi_pipe pipe = NULL;
 fdapi_poll poll = NULL;
 fdapi_read read = NULL;
+fdapi_recv recv = NULL;
 fdapi_select select = NULL;
+fdapi_send send = NULL;
 fdapi_setsockopt setsockopt = NULL;
 fdapi_socket socket = NULL;
 fdapi_write write = NULL;
@@ -484,6 +496,9 @@ int FDAPI_pipe(int *pfds) {
 
 int FDAPI_socket(int af, int type, int protocol) {
     try {
+        if (af == AF_UNIX && type == SOCK_STREAM) {
+            af = AF_INET;
+        }
         SOCKET socket = f_socket(af, type, protocol);
         if (socket != INVALID_SOCKET) {
             return RFDMap::getInstance().addSocket(socket);
@@ -622,6 +637,23 @@ int FDAPI_fcntl(int rfd, int cmd, int flags = 0 ) {
     return -1;
 }
 
+int FDAPI_ioctl(int rfd, int cmd, char *buf) {
+    try {
+        SocketInfo* socket_info = RFDMap::getInstance().lookupSocketInfo(rfd);
+        if (socket_info != NULL && socket_info->socket != INVALID_SOCKET) {
+            if (f_ioctlsocket(socket_info->socket, cmd, (u_long *)buf) != SOCKET_ERROR) {
+                return 0;
+            } else {
+                errno = f_WSAGetLastError();
+                return -1;
+            }
+        }
+    } CATCH_AND_REPORT();
+
+    errno = EBADF;
+    return -1;
+}
+
 int FDAPI_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     try {
         struct pollfd* pollCopy = new struct pollfd[nfds];
@@ -730,10 +762,32 @@ int FDAPI_getsockopt(int rfd, int level, int optname, void *optval, socklen_t *o
 
 int FDAPI_connect(int rfd, const struct sockaddr *addr, size_t addrlen) {
     try {
+        struct sockaddr addr_local = *addr;
+        socklen_t addrlen_local = (socklen_t)addrlen;
         SOCKET socket = RFDMap::getInstance().lookupSocket(rfd);
         if (socket != INVALID_SOCKET) {
             EnableFastLoopback(socket);
-            int result = f_connect(socket, addr, (int) addrlen);
+            if (addr->sa_family == AF_UNIX) {
+                struct sockaddr_un const *un =
+                    reinterpret_cast<sockaddr_un const *>(addr);
+                char name[MAX_PATH];
+                sprintf(name, AF_UNIX_SEMAPHORE_NAME_FORMAT, un->sun_path);
+                HANDLE semaphore = OpenSemaphoreA(SEMAPHORE_ALL_ACCESS, FALSE, name);
+                if (semaphore) {
+                    if (WaitForSingleObject(semaphore, 1) == WAIT_OBJECT_0) {
+                        LONG semaphore_count = 0;
+                        ReleaseSemaphore(semaphore, 1, &semaphore_count);
+                        sockaddr_in addr_in = { };
+                        addr_in.sin_family = AF_INET;
+                        addr_in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                        addr_in.sin_port = static_cast<USHORT>(semaphore_count >> AF_UNIX_PORT_NUMBER_SHIFT);
+                        addrlen_local = sizeof(addr_in);
+                        reinterpret_cast<sockaddr_in &>(addr_local) = addr_in;
+                    }
+                    CloseHandle(semaphore);
+                }
+            }
+            int result = f_connect(socket, &addr_local, addrlen_local);
             errno = f_WSAGetLastError();
             if ((errno == WSAEINVAL) || (errno == WSAEWOULDBLOCK) || (errno == WSA_IO_PENDING)) {
                 errno = EINPROGRESS;
@@ -773,6 +827,42 @@ ssize_t FDAPI_read(int rfd, void *buf, size_t count) {
         }
     } CATCH_AND_REPORT();
 
+    errno = EBADF;
+    return -1;
+}
+
+ssize_t FDAPI_recv(int rfd, void *buf, size_t count, int flags) {
+    try {
+        SOCKET socket = RFDMap::getInstance().lookupSocket(rfd);
+        if (socket != INVALID_SOCKET) {
+            int retval = f_recv(socket, (char*) buf, (unsigned int) count, flags);
+            if (retval == -1) {
+                errno = GetLastError();
+                if (errno == WSAEWOULDBLOCK) {
+                    errno = EAGAIN;
+                }
+            }
+            return retval;
+        }
+    } CATCH_AND_REPORT();
+    errno = EBADF;
+    return -1;
+}
+
+ssize_t FDAPI_send(int rfd, const void *buf, size_t count, int flags) {
+    try {
+        SOCKET socket = RFDMap::getInstance().lookupSocket(rfd);
+        if (socket != INVALID_SOCKET) {
+            int retval = f_send(socket, (const char*) buf, (unsigned int) count, flags);
+            if (retval == -1) {
+                errno = GetLastError();
+                if (errno == WSAEWOULDBLOCK) {
+                    errno = EAGAIN;
+                }
+            }
+            return retval;
+        }
+    } CATCH_AND_REPORT();
     errno = EBADF;
     return -1;
 }
@@ -910,11 +1000,96 @@ int FDAPI_ftruncate(int rfd, PORT_LONGLONG length) {
     return -1;
 }
 
+class CSLock {
+    CRITICAL_SECTION *mutex;
+    int locked;
+    CSLock(CSLock const &);
+    CSLock &operator =(CSLock const &);
+public:
+    ~CSLock() { if (this->locked) { this->unlock(); } }
+    void lock() { EnterCriticalSection(this->mutex); ++this->locked; }
+    void unlock() { LeaveCriticalSection(this->mutex); --this->locked; }
+    CSLock(CRITICAL_SECTION &mutex, bool const lock) : mutex(&mutex), locked() {
+        if (lock) {
+            this->lock();
+        }
+    }
+};
+
 int FDAPI_bind(int rfd, const struct sockaddr *addr, socklen_t addrlen) {
     try {
-        SOCKET socket = RFDMap::getInstance().lookupSocket(rfd);
+        struct sockaddr addr_local = *addr;
+        socklen_t addrlen_local = addrlen;
+        RFDMap& rfdmap = RFDMap::getInstance();
+        CSLock cs(rfdmap.mutex, addr_local.sa_family == AF_UNIX);
+        SOCKET socket = rfdmap.lookupSocket(rfd);
         if (socket != INVALID_SOCKET) {
-            return f_bind(socket, addr, addrlen);
+            HANDLE semaphore = NULL;
+            LONG semaphore_count = 0;
+            if (addr_local.sa_family == AF_UNIX) {
+                sockaddr_in addr_in = { };
+                addr_in.sin_family = AF_INET;
+                addr_in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                addr_in.sin_port = 0;
+                addrlen_local = sizeof(addr_in);
+                struct sockaddr_un const *un =
+                    reinterpret_cast<sockaddr_un const *>(addr);
+                char name[MAX_PATH];
+                sprintf(name, AF_UNIX_SEMAPHORE_NAME_FORMAT, un->sun_path);
+                do {
+                    semaphore = CreateSemaphoreA(NULL, 0, LONG_MAX, name);
+                    if (!semaphore) {
+                        errno = EINVAL;
+                        return -1;
+                    }
+                    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+                        /* NOTE: in hindsight, this shouldn't really happen,
+                           so some of this complexity might be unnecessary.
+                           But since I wrote it and don't understand socket
+                           sharing well enough to rule it out,
+                           I'll just keep it...
+                        */
+
+                        /* Wait for whomever is creating the port */
+                        if (WaitForSingleObject(semaphore, 1) == WAIT_OBJECT_0) {
+                            ReleaseSemaphore(semaphore, 1, &semaphore_count);
+                        } else {
+                            /* They probably died :( try again */
+                            CloseHandle(semaphore);
+                            semaphore = NULL;
+                        }
+                    }
+                } while (!semaphore);
+                if (semaphore_count) {
+                    addr_in.sin_port = static_cast<USHORT>(semaphore_count >> AF_UNIX_PORT_NUMBER_SHIFT);
+                }
+                reinterpret_cast<sockaddr_in &>(addr_local) = addr_in;
+            }
+            int result = f_bind(socket, &addr_local, addrlen_local);
+            if (semaphore) {
+              if (result != 0) {
+                  /* Close the semaphore; hopefully will wait forever... */
+                  CloseHandle(semaphore);
+                  semaphore = NULL;
+              } else if (!semaphore_count) {
+                  /* Store the port number in the semaphore's upper bits. */
+                  if (f_getsockname(socket, &addr_local, &addrlen_local) == 0) {
+                      long const lport = reinterpret_cast<struct sockaddr_in &>(addr_local).sin_port;
+                      ReleaseSemaphore(semaphore, (lport << AF_UNIX_PORT_NUMBER_SHIFT) + ((1L << AF_UNIX_PORT_NUMBER_SHIFT) - 1), &semaphore_count);
+                      SocketInfo* socket_info = rfdmap.lookupSocketInfo(rfd);
+                      if (socket_info) {
+                          if (socket_info->semaphore) {
+                              CloseHandle(socket_info->semaphore);
+                          }
+                          socket_info->semaphore = semaphore;
+                      } else {
+                          /* Something went wrong... oh well, at least clean up */
+                          CloseHandle(semaphore);
+                      }
+                  }
+              }
+            }
+            return result;
         } else {
             errno = EBADF;
             return 0;
@@ -1195,12 +1370,14 @@ private:
         bind = FDAPI_bind;
         connect = FDAPI_connect;
         fcntl = FDAPI_fcntl;
+        ioctl = FDAPI_ioctl;
         fdapi_fstat64 = (fdapi_fstat) FDAPI_fstat64;
         freeaddrinfo = FDAPI_freeaddrinfo;
         fsync = FDAPI_fsync;
         ftruncate = FDAPI_ftruncate;
         getaddrinfo = FDAPI_getaddrinfo;
         getsockopt = FDAPI_getsockopt;
+        gethostbyname = FDAPI_gethostbyname;
         getpeername = FDAPI_getpeername;
         getsockname = FDAPI_getsockname;
         htonl = FDAPI_htonl;
@@ -1216,9 +1393,11 @@ private:
         pipe = FDAPI_pipe;
         poll = FDAPI_poll;
         read = FDAPI_read;
+        recv = FDAPI_recv;
         select = FDAPI_select;
         setsockopt = FDAPI_setsockopt;
         socket = FDAPI_socket;
+        send = FDAPI_send;
         write = FDAPI_write;
     }
 

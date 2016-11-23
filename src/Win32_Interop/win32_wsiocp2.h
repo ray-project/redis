@@ -40,5 +40,6 @@ int WSIOCP_Listen(int rfd, int backlog);
 int WSIOCP_Accept(int rfd, struct sockaddr *sa, socklen_t *len);
 int WSIOCP_SocketConnect(int rfd, const SOCKADDR_STORAGE *ss);
 int WSIOCP_SocketConnectBind(int rfd, const SOCKADDR_STORAGE *ss, const char* source_addr);
+int WSIOCP_SocketAttach(int fd, struct iocpSockState *socketState);
 
 #endif
